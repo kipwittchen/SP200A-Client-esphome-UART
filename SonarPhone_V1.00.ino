@@ -23,9 +23,9 @@ float metersToFeet = 3.28084;
 bool haveMac = false;
 int depthMin = 0;
 int depthMax = 0; 
-int beamWidth = 0; // 8 = 20 deg, 2 = 40 deg
+int beamWidth = 8; // 8 = 20 deg, 2 = 40 deg
 int dataCount = 0;
-int depthUnits = 0; //0 = meters, 1 = feet
+int depthUnits = 1; //0 = meters, 1 = feet
 float depth = 0.0;
 float depthFrac = 0.0;
 float vBatt = 0.0;
