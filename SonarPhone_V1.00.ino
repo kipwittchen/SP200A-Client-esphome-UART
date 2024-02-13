@@ -3,13 +3,10 @@
  * first master has been established.
  * The SonarPhone phone app is not required unless SP200A is 
  * factory reset.
- * Numerical depth is transmitted on SeaTalk on pin 4.
- * SeaTalk protocol thanks to Thomas Knauf thomasknauf.de/seatalk.htm
- * Output on pin 4 drives a FET gate directly. FET drain connects to  
- * SeaTalk data, FET source to SeaTalk ground. 
+ * Numerical depth, battery voltage, and temperature is transmitted via esphome-uart-p2p via seral1 with pins 16/17.
  * 
- * - Jim McKeown
- * Last update 23 December 2022
+ * Original code for SP200A-esp32 connection by Jim McKeown, https://github.com/jim-mckeown/SP200A-Client
+ * Original code for esphome-uart-p2p by KG3RK3N, https://github.com/KG3RK3N/esphome-uart-p2p
  */
 
 #include "WiFi.h"
@@ -20,12 +17,7 @@ const char * ssid = "T-BOX-720";
 const char * password = "";
 uint8_t FC[] = {70,67,21,0,244,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // mac address, units, beam width, depth max/min, checksum not set
 uint8_t FX[] = {70,88,21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,179,0,0,0,0,0,0,0,0,0}; // 
-const int wordLength = 11;
-int seaTalkOut = 4;
-int seaTalkIn = 16; // connect to pin 4
-int busQuiet = 17; // monitor for troubleshooting  
-int bitTime = 208; // 1/4800 bps = 208 uS
-int idleTime = bitTime * 11;
+
 float metersToFeet = 3.28084;
 
 bool haveMac = false;
@@ -43,112 +35,71 @@ int loopCount = 0;
 bool newData = false;
 bool FCsent = false;
 
-volatile bool busQuietFlag = false;
-
-int sendBuffer[] = {1536,1028,1024,0,0};
-
-hw_timer_t * timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
-
+//Pins for Serial1 connection to be used with esphome-uart-p2p
+#define RX1 16
+#define TX1 17
 
 AsyncUDP udp;
 
-void IRAM_ATTR onTimer() 
-{
-  portENTER_CRITICAL_ISR(&timerMux);
-  busQuietFlag = true;
-  digitalWrite(busQuiet, HIGH);
-  portEXIT_CRITICAL_ISR(&timerMux);
-}
-
-void IRAM_ATTR inputChangeInterrupt() 
-{
-  portENTER_CRITICAL_ISR(&timerMux);
-  timerWrite(timer, 0);
-  busQuietFlag = false;
-  digitalWrite(busQuiet, LOW);
-  portEXIT_CRITICAL_ISR(&timerMux);
-}
-
-
-/*  Send contents of sendBuffer array on SeaTalk output.
- *  Verify same level on SeaTalk receive pin
+/*  Send updates via esphome-uart-p2p.
  */  
  
-bool sendSeaTalk()
+bool sendSonarData()
 {
-  int currentByte = 0;
-  int currentBit = 0;
-  int sendBufferLen = sizeof sendBuffer / sizeof sendBuffer[0];
   float depthToSend = 0.0;
 
   // set depth units to feet - convert meters to feet
   if(depthUnits == 1)
   {
-    // sendBuffer[2] = 1024;
     depthToSend = depth; 
   }
   else
   {
-    // sendBuffer[2] = 1032; // bit 6 of Y set 1024 + 128 = 1152, 1024 + 8 = 1032
     depthToSend = depth * metersToFeet;
   }
   
-  // calculate lower byte depth
-  int intDepthX10 = depthToSend * 10; 
-  sendBuffer[3] = 1024 + ((intDepthX10 % 256) * 2);
-
-  // calculate upper byte depth
-  sendBuffer[4] = 1024 + ((intDepthX10 / 256) * 2);
+  uint8_t address1 = 0x01;  // <- thats the address from the esphome sensor
+  uint8_t sensorType = 0; // 0 = number, 1 = binary, 2 = text
+  sendUartData(address1, &depthToSend, sizeof(depthToSend), sensorType);
+  uint8_t address2 = 0x02;  // <- thats the address from the esphome sensor
+  sendUartData(address2, &vBatt, sizeof(vBatt), sensorType);
+  uint8_t address3 = 0x03;  // <- thats the address from the esphome sensor
+  sendUartData(address3, &temp, sizeof(temp), sensorType);
   
-  for(int i = 0;i < sendBufferLen;i++)
-  {
-    currentByte = sendBuffer[i];
-    for(int j = 0;j < wordLength;j++)
-    {
-        currentBit = currentByte % 2; // get lsb
-        currentByte /= 2; // shift current byte right
-        if(currentBit)
-        {
-          digitalWrite(seaTalkOut, LOW);
-          if(digitalRead(seaTalkIn)) return false;
-          delayMicroseconds(bitTime / 2);
-          if(digitalRead(seaTalkIn)) return false;
-          delayMicroseconds(bitTime / 2);
-          if(digitalRead(seaTalkIn)) return false;
-        }
-        else
-        {
-          digitalWrite(seaTalkOut, HIGH);
-          if(!digitalRead(seaTalkIn)) return false;
-          delayMicroseconds(bitTime / 2);
-          if(!digitalRead(seaTalkIn)) return false;
-          delayMicroseconds(bitTime / 2);
-          if(!digitalRead(seaTalkIn)) return false;
-        }
-    }
-  }
   return true;
 }
 
+//esphome-uart-p2p start
+// code to generate & send uart message
+static const int headerSize = 3;
+
+void sendUartData(uint8_t address, const void *data, size_t dataLength, uint8_t sensorType) {
+  uint8_t uartData[headerSize + dataLength];
+  uartData[0] = address;
+  uartData[1] = sensorType;
+  uartData[2] = dataLength;
+
+  memcpy(uartData + headerSize, data, dataLength);
+
+  uint8_t checksum = calculateChecksum(uartData, headerSize + dataLength);
+  uartData[headerSize + dataLength] = checksum;
+
+  Serial1.write(uartData, headerSize + dataLength + sizeof(uint8_t));
+}
+
+uint8_t calculateChecksum(const uint8_t *data, size_t length) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < length; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
+//esphome-uart-p2p end
+
 void setup()
 {
-    pinMode(seaTalkOut, OUTPUT);
-    digitalWrite(seaTalkOut, 0);
-    pinMode(seaTalkIn, INPUT);
-    pinMode(busQuiet, OUTPUT);
-    digitalWrite(busQuiet, 0);
-    attachInterrupt(digitalPinToInterrupt(seaTalkIn), inputChangeInterrupt, CHANGE);
-    
     Serial.begin(115200);
-
-    // setup and enable busQuiet timer
-    timer = timerBegin(0, 80, true); // timer 0, 80 prescaler, count up
-    timerAttachInterrupt(timer, &onTimer, true); // pointer to timer, address of interrupt handler, edge
-    timerAlarmWrite(timer, idleTime, true); // pointer to timer, interrupt value (11/4800 seconds), auto-reload
-    timerAlarmEnable(timer);
-    //timerStop(timer); // timer enabled but not started
-
+    Serial1.begin(115200,SERIAL_8N1,RX1,TX1); //for UART to esphome receiver
 
     //WiFiManager intialization
     WiFi.mode(WIFI_STA);
@@ -213,7 +164,7 @@ void setup()
               beamWidth = packet.data()[32];
               vBattFrac = packet.data()[31];
               vBatt = packet.data()[30] + (vBattFrac / 100);
-              temp = packet.data()[26];
+              temp = packet.data()[26] * 9.0/5.0 + 32.0; //convert reported °C to °F
               newData = true;
             }
             dataCount++;
@@ -229,14 +180,16 @@ void loop()
 {
     if(haveMac)
     {
-
       if(newData)
       {
         Serial.printf("Depth: %.1f ", depth);
-        while(!busQuietFlag);
-        if(!sendSeaTalk())
+        //Serial.println();
+        //Serial.printf("Temp: %.1f", temp);
+        //Serial.println();
+        //Serial.printf("vBatt: %.1f ", vBatt);
+        if(!sendSonarData())
         {
-          Serial.println("Error in sendSeaTalk()");
+          Serial.println("Error in sendSonarData()");
         }
         newData = false;
       }
