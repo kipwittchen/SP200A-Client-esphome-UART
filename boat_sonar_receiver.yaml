@@ -1,0 +1,63 @@
+esphome:
+  name: boat_sonar_receiver
+  friendly_name: boat_sonar_receiver
+
+esp32:
+  board: node32s
+
+external_components:
+  - source:
+      url: https://github.com/KG3RK3N/esphome-uart-p2p
+      type: git
+    components: [uart_p2p_receiver]
+    refresh: 60min # force fetch external repo if local older than 60 minutes
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Boat Sonar Receiver Fallback Hotspot"
+    password: "yourpassword"
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "yourkey"
+
+ota:
+  password: "yourpassword"
+
+
+captive_portal:
+
+
+uart:
+  id: uart_1
+  tx_pin: GPIO16 //connceted to RX on transmitter
+  rx_pin: GPIO17 //connceted to TX on transmitter
+  baud_rate: 115200
+
+uart_p2p_receiver:
+  uart_id: uart_1
+  sensors:
+    - id: sonar_depth
+      name: "Sonar Depth"
+      unit_of_measurement: "ft"
+      address: 0x01
+      accuracy_decimals: 1
+    - id: sonar_battery_voltage
+      name: "Sonar Battery Voltage"
+      unit_of_measurement: "v"
+      address: 0x02
+      accuracy_decimals: 2
+    - id: sonar_temperature
+      name: "Sonar Temperature"
+      unit_of_measurement: "°F"
+      address: 0x03
+      accuracy_decimals: 1
